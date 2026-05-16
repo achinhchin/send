@@ -31,7 +31,7 @@ Server creates `database/users.db` automatically. Web UI is served at `http://<h
 
 ### 3. Use Web Client
 Open `http://<host>:<port>` in a browser.
-- Sign up → Login → See active devices
+- Click **Sign Up** tab → create account → switch to **Login** tab → login
 - Click a device to select it → Drop/select files to send
 - Incoming files auto-download
 
@@ -42,10 +42,18 @@ cargo build --release
 ```
 The binary is at `target/release/CLI`. Copy it + `settings.json` anywhere.
 
-**First time:**
-```bash
-./CLI signup myuser mypassword
-./CLI login myuser mypassword
+**Create account:**
+```
+$ ./CLI signup alice
+Password: ••••••••
+Signed up. Now run: login [username]
+```
+
+**Login (password is always hidden):**
+```
+$ ./CLI login alice
+Password: ••••••••
+Logged in. Connecting...
 ```
 
 **Reconnect (session saved in `session.txt`):**
@@ -62,13 +70,14 @@ quit                    - disconnect
 
 **Example session:**
 ```
-$ ./CLI login alice secret123
+$ ./CLI login alice
+Password: ••••••••
 Logged in. Connecting...
 Connected! Commands: list | send <id> <filepath> | quit
 
 --- Devices ---
 [1] Dev-A3Bc9f (You) [cli]
-[2] Dev-X7Yz2w [web]
+[2] Dev-X7Yz2w [cli]
 ---------------
 
 > send 2 ~/photo.jpg

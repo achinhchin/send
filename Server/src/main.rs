@@ -66,6 +66,7 @@ async fn login(State(s): State<Arc<AppState>>, Json(p): Json<AuthReq>) -> impl I
     if verify(p.password.unwrap_or_default(), &h).unwrap_or(false) {
         let mut b = [0u8; 24]; rand::thread_rng().fill_bytes(&mut b);
         let session = base64::engine::general_purpose::STANDARD.encode(b);
+        db.execute("DELETE FROM Sessions WHERE timeout < ?1", params![ts()]).ok();
         db.execute("INSERT INTO Sessions VALUES (?1, ?2, ?3)", params![p.username, &session, ts() + 604800]).unwrap();
         (StatusCode::OK, Json(AuthRes { status: "ok".into(), session: Some(session) }))
     } else {
