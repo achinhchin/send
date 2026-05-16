@@ -1,0 +1,17 @@
+# Rust
+**/target/
+**/*.rs.bk
+
+# Database
+*.db
+*.db-journal
+**/database/
+
+# CLI runtime files
+session.txt
+devices.json
+received_*
+
+# OS
+.DS_Store
+settings.json

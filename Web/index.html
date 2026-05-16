@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Send - Direct File Transfer</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Auth View -->
+        <div id="auth-view" class="view active">
+            <div class="auth-container">
+                <h1>Send</h1>
+                <p>Direct File Transfer</p>
+                <div class="segmented-control">
+                    <button id="tab-login" class="active">Login</button>
+                    <button id="tab-signup">Sign Up</button>
+                </div>
+                <form id="auth-form">
+                    <input type="text" id="auth-username" placeholder="Username (max 31 chars)" maxlength="31" required pattern="[A-Za-z0-9]+">
+                    <input type="password" id="auth-password" placeholder="Password" required>
+                    <button type="submit" id="auth-submit">Login</button>
+                    <p id="auth-error" class="error"></p>
+                </form>
+            </div>
+        </div>
+
+        <!-- Dashboard View -->
+        <div id="dashboard-view" class="view">
+            <header>
+                <h1>Send</h1>
+                <div class="user-controls">
+                    <span id="current-username"></span>
+                    <button id="reload-btn" title="Press 'r' to reload">↻ Reload</button>
+                    <button id="logout-btn">Logout</button>
+                </div>
+            </header>
+            
+            <main>
+                <section class="device-list-container">
+                    <h2>Active Devices</h2>
+                    <ul id="device-list">
+                        <!-- Devices will be populated here -->
+                        <li class="empty-state">No other devices connected.</li>
+                    </ul>
+                </section>
+
+                <section class="transfer-area">
+                    <h2>Transfer Files</h2>
+                    <div id="drop-zone" class="drop-zone">
+                        <p>Drag & Drop files here, or click to select</p>
+                        <input type="file" id="file-input" multiple style="display: none;">
+                    </div>
+                    <div id="transfer-status"></div>
+                </section>
+            </main>
+        </div>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>
