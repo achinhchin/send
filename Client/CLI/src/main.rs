@@ -19,6 +19,20 @@ fn load_settings() -> (String, u16) {
     (host, port)
 }
 
+fn prompt(label: &str) -> String {
+    print!("{}: ", label);
+    io::stdout().flush().unwrap();
+    let mut s = String::new();
+    io::stdin().read_line(&mut s).unwrap();
+    s.trim().to_string()
+}
+
+fn auth_prompt(args: &[String]) -> (String, String) {
+    let user = args.get(2).map(|s| s.clone()).unwrap_or_else(|| prompt("Username"));
+    let pass = rpassword::prompt_password("Password: ").unwrap();
+    (user, pass)
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = env::args().collect();
@@ -29,18 +43,16 @@ async fn main() {
 
     match cmd {
         "signup" => {
-            let user = args.get(2).expect("Usage: signup <user> <pass>");
-            let pass = args.get(3).expect("Usage: signup <user> <pass>");
+            let (user, pass) = auth_prompt(&args);
             let res = Client::new().post(format!("{}/api/signup", api_url))
-                .json(&AuthReq { username: user.into(), password: Some(pass.into()) })
+                .json(&AuthReq { username: user, password: Some(pass) })
                 .send().await.unwrap().json::<AuthRes>().await.unwrap();
-            println!("{}", if res.status == "ok" { "Signed up. Now run: login <user> <pass>" } else { "Signup failed (user may exist)" });
+            println!("{}", if res.status == "ok" { "Signed up. Now run: login [username]" } else { "Signup failed (user may exist)" });
         }
         "login" => {
-            let user = args.get(2).expect("Usage: login <user> <pass>");
-            let pass = args.get(3).expect("Usage: login <user> <pass>");
+            let (user, pass) = auth_prompt(&args);
             let res = Client::new().post(format!("{}/api/login", api_url))
-                .json(&AuthReq { username: user.into(), password: Some(pass.into()) })
+                .json(&AuthReq { username: user, password: Some(pass) })
                 .send().await.unwrap().json::<AuthRes>().await.unwrap();
             if res.status == "ok" {
                 let sess = res.session.unwrap();
@@ -51,7 +63,7 @@ async fn main() {
         }
         _ => {
             let sess = fs::read_to_string(session_file)
-                .expect("Not logged in. Run: send-cli login <user> <pass>");
+                .expect("Not logged in. Run: send-cli login [username]");
             println!("Reconnecting with saved session...");
             run_session(&host, port, &sess).await;
         }
