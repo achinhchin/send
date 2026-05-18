@@ -89,6 +89,7 @@ type DeviceEntry struct {
 }
 
 type Mode int
+
 const (
 	ModeDeviceList Mode = iota
 	ModeFileInput
@@ -97,18 +98,18 @@ const (
 )
 
 type App struct {
-	Mode         Mode
-	Devices      []DeviceEntry
-	Selected     int
-	MyID         string
-	MyUsername   string
-	MyPrivateIP  string
-	Status       string
-	OutputPath   string
-	
+	Mode        Mode
+	Devices     []DeviceEntry
+	Selected    int
+	MyID        string
+	MyUsername  string
+	MyPrivateIP string
+	Status      string
+	OutputPath  string
+
 	// Input buf
 	InputBuf string
-	
+
 	// Transfer state
 	FileName    string
 	FileTotal   int
@@ -175,7 +176,7 @@ func main() {
 		passBytes, _ := term.ReadPassword(int(os.Stdin.Fd()))
 		fmt.Println()
 		pass := string(passBytes)
-		
+
 		url := fmt.Sprintf("http://%s:%d/api/signup", *config.Host, *config.Port)
 		b, _ := json.Marshal(map[string]string{"username": user, "password": pass})
 		resp, err := http.Post(url, "application/json", bytes.NewBuffer(b))
@@ -335,16 +336,17 @@ func main() {
 
 // Global TUI channels and state
 var (
-	appState  *App
-	appMu     sync.Mutex
-	renderCh  = make(chan struct{}, 10)
-	inputCh   = make(chan []byte, 100)
-	wsConn    *websocket.Conn
-	
+	appState *App
+	appMu    sync.Mutex
+	renderCh = make(chan struct{}, 10)
+	inputCh  = make(chan []byte, 100)
+	wsConn   *websocket.Conn
+
 	// Transfer state
-	incomingChunks map[string][]string // from -> chunks
-	incomingTotal  map[string]int
-	incomingName   map[string]string
+	incomingFiles map[string]*os.File
+	incomingTotal map[string]int
+	incomingDone  map[string]int
+	incomingName  map[string]string
 )
 
 func queueRender() {
@@ -375,8 +377,9 @@ func runTUI(host string, port uint16, session string, username string, devName s
 	c.WriteJSON(authMsg)
 
 	appState = newApp(output, privIP, username)
-	incomingChunks = make(map[string][]string)
+	incomingFiles = make(map[string]*os.File)
 	incomingTotal = make(map[string]int)
+	incomingDone = make(map[string]int)
 	incomingName = make(map[string]string)
 
 	// Enter raw mode
@@ -386,7 +389,7 @@ func runTUI(host string, port uint16, session string, username string, devName s
 	}
 	defer term.Restore(int(os.Stdin.Fd()), oldState)
 
-	fmt.Print("\033[?1049h\033[?25l") // alternate screen, hide cursor
+	fmt.Print("\033[?1049h\033[?25l")       // alternate screen, hide cursor
 	defer fmt.Print("\033[?1049l\033[?25h") // restore screen, show cursor
 
 	go func() {
@@ -467,13 +470,18 @@ func handleWSMessage(v map[string]interface{}) {
 		sizeFloat, _ := v["size"].(float64)
 		size := int(sizeFloat)
 		total := (size + CHUNK_SIZE - 1) / CHUNK_SIZE
-		incomingChunks[from] = make([]string, total)
+		path := filepath.Join(appState.OutputPath, name)
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err == nil {
+			incomingFiles[from] = f
+		}
 		incomingTotal[from] = total
+		incomingDone[from] = 0
 		incomingName[from] = name
 		appState.Mode = ModeReceiving
 		appState.FileName = name
 		appState.FilePercent = 0
-		
+
 		route := "Server Relay"
 		for _, d := range appState.Devices {
 			if d.ID == from {
@@ -488,22 +496,14 @@ func handleWSMessage(v map[string]interface{}) {
 		appState.Status = fmt.Sprintf("Incoming via %s: %s (%d bytes)", route, name, size)
 	case "file_chunk":
 		from, _ := v["from"].(string)
-		idxFloat, _ := v["index"].(float64)
-		idx := int(idxFloat)
 		data, _ := v["data"].(string)
-		if chunks, ok := incomingChunks[from]; ok {
-			if idx < len(chunks) {
-				chunks[idx] = data
-			}
-			done := 0
-			for _, c := range chunks {
-				if c != "" {
-					done++
-				}
-			}
+		if f, ok := incomingFiles[from]; ok {
+			dec, _ := base64.StdEncoding.DecodeString(data)
+			f.Write(dec)
+			incomingDone[from]++
 			pct := 0
 			if incomingTotal[from] > 0 {
-				pct = done * 100 / incomingTotal[from]
+				pct = incomingDone[from] * 100 / incomingTotal[from]
 			}
 			appState.Mode = ModeReceiving
 			appState.FileName = incomingName[from]
@@ -511,18 +511,14 @@ func handleWSMessage(v map[string]interface{}) {
 		}
 	case "file_done":
 		from, _ := v["from"].(string)
-		if chunks, ok := incomingChunks[from]; ok {
-			var b []byte
-			for _, chunk := range chunks {
-				dec, _ := base64.StdEncoding.DecodeString(chunk)
-				b = append(b, dec...)
-			}
+		if f, ok := incomingFiles[from]; ok {
+			f.Close()
 			path := filepath.Join(appState.OutputPath, incomingName[from])
-			os.WriteFile(path, b, 0644)
 			appState.Status = fmt.Sprintf("✓ Saved '%s'", path)
 			appState.Mode = ModeDeviceList
-			delete(incomingChunks, from)
+			delete(incomingFiles, from)
 			delete(incomingTotal, from)
+			delete(incomingDone, from)
 			delete(incomingName, from)
 		}
 	// --- WebRTC Signaling Messages ---
@@ -562,13 +558,11 @@ var webrtcConfig = webrtc.Configuration{
 	},
 }
 
-func sendFile(target DeviceEntry, filename string, b []byte) {
-
-	// Mode and initial status are now set synchronously in handleKey
+func sendFile(target DeviceEntry, filename string, path string, size int) {
 
 	pc, err := webrtc.NewPeerConnection(webrtcConfig)
 	if err != nil {
-		fallbackSendViaServer(target, filename, b)
+		fallbackSendViaServer(target, filename, path, size)
 		return
 	}
 
@@ -578,7 +572,7 @@ func sendFile(target DeviceEntry, filename string, b []byte) {
 
 	dc, err := pc.CreateDataChannel("file", nil)
 	if err != nil {
-		fallbackSendViaServer(target, filename, b)
+		fallbackSendViaServer(target, filename, path, size)
 		return
 	}
 
@@ -592,21 +586,35 @@ func sendFile(target DeviceEntry, filename string, b []byte) {
 		appMu.Unlock()
 		queueRender()
 
-		// Send file chunks over DataChannel
-		for i := 0; i < len(b); i += CHUNK_SIZE {
-			end := i + CHUNK_SIZE
-			if end > len(b) {
-				end = len(b)
-			}
-			dc.Send(b[i:end])
+		file, err := os.Open(path)
+		if err != nil {
 			appMu.Lock()
-			appState.FileDone = end
+			appState.Status = fmt.Sprintf("✗ Cannot read file: %s", err.Error())
+			appState.Mode = ModeDeviceList
 			appMu.Unlock()
 			queueRender()
+			return
+		}
+		defer file.Close()
+
+		// Send file chunks over DataChannel
+		buf := make([]byte, CHUNK_SIZE)
+		for {
+			n, err := file.Read(buf)
+			if n > 0 {
+				dc.Send(buf[:n])
+				appMu.Lock()
+				appState.FileDone += n
+				appMu.Unlock()
+				queueRender()
+			}
+			if err != nil {
+				break
+			}
 		}
 		dc.SendText("DONE")
 		time.Sleep(1 * time.Second) // wait for buffer to flush
-		
+
 		appMu.Lock()
 		appState.Status = fmt.Sprintf("✓ Sent '%s' via Direct %s WebRTC", filename, route)
 		appState.Mode = ModeDeviceList
@@ -624,14 +632,14 @@ func sendFile(target DeviceEntry, filename string, b []byte) {
 
 	offer, err := pc.CreateOffer(nil)
 	if err != nil {
-		fallbackSendViaServer(target, filename, b)
+		fallbackSendViaServer(target, filename, path, size)
 		return
 	}
 	pc.SetLocalDescription(offer)
 
 	wsConn.WriteJSON(map[string]interface{}{
 		"type": "webrtc_offer", "to": target.ID, "sdp": offer.SDP,
-		"filename": filename, "size": len(b),
+		"filename": filename, "size": size,
 	})
 
 	// Fallback timeout
@@ -642,25 +650,28 @@ func sendFile(target DeviceEntry, filename string, b []byte) {
 			appState.Status = "WebRTC Timeout, falling back to Server Relay..."
 			appMu.Unlock()
 			queueRender()
-			
+
 			pc.Close()
 			pcMu.Lock()
 			delete(peerConnections, target.ID)
 			pcMu.Unlock()
-			fallbackSendViaServer(target, filename, b)
+			fallbackSendViaServer(target, filename, path, size)
 		}
 	}()
 }
 
 func handleIncomingWebRTC(from string, sdp string, filename string, size int) {
 	pc, err := webrtc.NewPeerConnection(webrtcConfig)
-	if err != nil { return }
-	
+	if err != nil {
+		return
+	}
+
 	pcMu.Lock()
 	peerConnections[from] = pc
 	pcMu.Unlock()
 
-	var fileBuf []byte
+	var file *os.File
+	var receivedSize int
 
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
 		dc.OnOpen(func() {
@@ -669,14 +680,22 @@ func handleIncomingWebRTC(from string, sdp string, filename string, size int) {
 			appState.FileName = filename
 			appState.FilePercent = 0
 			appState.Status = fmt.Sprintf("Receiving via Direct WebRTC from %s", from)
+
+			path := filepath.Join(appState.OutputPath, filename)
+			f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+			if err == nil {
+				file = f
+			}
 			appMu.Unlock()
 			queueRender()
 		})
 
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 			if msg.IsString && string(msg.Data) == "DONE" {
+				if file != nil {
+					file.Close()
+				}
 				path := filepath.Join(appState.OutputPath, filename)
-				os.WriteFile(path, fileBuf, 0644)
 				appMu.Lock()
 				appState.Status = fmt.Sprintf("✓ Saved '%s' (Direct WebRTC)", path)
 				appState.Mode = ModeDeviceList
@@ -684,11 +703,16 @@ func handleIncomingWebRTC(from string, sdp string, filename string, size int) {
 				queueRender()
 				return
 			}
-			fileBuf = append(fileBuf, msg.Data...)
-			
+			if file != nil {
+				file.Write(msg.Data)
+				receivedSize += len(msg.Data)
+			}
+
 			appMu.Lock()
 			pct := 0
-			if size > 0 { pct = len(fileBuf) * 100 / size }
+			if size > 0 {
+				pct = receivedSize * 100 / size
+			}
 			appState.FilePercent = pct
 			appMu.Unlock()
 			queueRender()
@@ -712,7 +736,18 @@ func handleIncomingWebRTC(from string, sdp string, filename string, size int) {
 	})
 }
 
-func fallbackSendViaServer(target DeviceEntry, filename string, b []byte) {
+func fallbackSendViaServer(target DeviceEntry, filename string, path string, size int) {
+	file, err := os.Open(path)
+	if err != nil {
+		appMu.Lock()
+		appState.Status = fmt.Sprintf("✗ Cannot read file: %s", err.Error())
+		appState.Mode = ModeDeviceList
+		appMu.Unlock()
+		queueRender()
+		return
+	}
+	defer file.Close()
+
 	appMu.Lock()
 	route := "WAN Relay"
 	if sameLan(appState.MyPrivateIP, target.PrivateIP) {
@@ -720,36 +755,40 @@ func fallbackSendViaServer(target DeviceEntry, filename string, b []byte) {
 	}
 	appState.Mode = ModeSending
 	appState.FileName = filename
-	appState.FileTotal = len(b)
+	appState.FileTotal = size
 	appState.FileDone = 0
 	appState.Status = fmt.Sprintf("Sending via %s to %s", route, target.ID)
 	appMu.Unlock()
 	queueRender()
 
-	total := (len(b) + CHUNK_SIZE - 1) / CHUNK_SIZE
+	total := (size + CHUNK_SIZE - 1) / CHUNK_SIZE
 	wsConn.WriteJSON(map[string]interface{}{
-		"type": "file_offer", "to": target.ID, "filename": filename, "size": len(b),
+		"type": "file_offer", "to": target.ID, "filename": filename, "size": size,
 	})
 
-	for i := 0; i < total; i++ {
-		start := i * CHUNK_SIZE
-		end := start + CHUNK_SIZE
-		if end > len(b) {
-			end = len(b)
+	buf := make([]byte, CHUNK_SIZE)
+	i := 0
+	for {
+		n, err := file.Read(buf)
+		if n > 0 {
+			b64 := base64.StdEncoding.EncodeToString(buf[:n])
+			wsConn.WriteJSON(map[string]interface{}{
+				"type": "file_chunk", "to": target.ID, "index": i, "data": b64,
+			})
+			i++
+			appMu.Lock()
+			appState.FileDone += n
+			appMu.Unlock()
+			queueRender()
 		}
-		b64 := base64.StdEncoding.EncodeToString(b[start:end])
-		wsConn.WriteJSON(map[string]interface{}{
-			"type": "file_chunk", "to": target.ID, "index": i, "data": b64,
-		})
-		appMu.Lock()
-		appState.FileDone = end
-		appMu.Unlock()
-		queueRender()
+		if err != nil {
+			break
+		}
 	}
 	wsConn.WriteJSON(map[string]interface{}{
 		"type": "file_done", "to": target.ID, "filename": filename, "totalChunks": total,
 	})
-	
+
 	appMu.Lock()
 	appState.Status = fmt.Sprintf("✓ Sent '%s' via %s", filename, route)
 	appState.Mode = ModeDeviceList
@@ -760,9 +799,11 @@ func fallbackSendViaServer(target DeviceEntry, filename string, b []byte) {
 // ── TUI ─────────────────────────────────────────────────────────────────────
 
 func handleKey(key []byte) bool {
-	if len(key) == 0 { return false }
+	if len(key) == 0 {
+		return false
+	}
 	c := key[0]
-	
+
 	// Quit on q or Ctrl+C
 	if c == 'q' || c == 3 {
 		return true
@@ -772,9 +813,13 @@ func handleKey(key []byte) bool {
 	case ModeDeviceList:
 		if c == '\033' && len(key) >= 3 && key[1] == '[' {
 			if key[2] == 'A' { // Up
-				if appState.Selected > 0 { appState.Selected-- }
+				if appState.Selected > 0 {
+					appState.Selected--
+				}
 			} else if key[2] == 'B' { // Down
-				if appState.Selected < len(appState.targets())-1 { appState.Selected++ }
+				if appState.Selected < len(appState.targets())-1 {
+					appState.Selected++
+				}
 			}
 		} else if c == '\r' || c == '\n' {
 			ts := appState.targets()
@@ -784,7 +829,7 @@ func handleKey(key []byte) bool {
 				if sameLan(appState.MyPrivateIP, target.PrivateIP) {
 					route = "LAN"
 				}
-				
+
 				appState.Mode = ModeFileInput
 				appState.InputBuf = ""
 				appState.Status = fmt.Sprintf("→ %s  │  Priority: Direct %s WebRTC", target.ID, route)
@@ -802,8 +847,8 @@ func handleKey(key []byte) bool {
 			if appState.Selected < len(ts) {
 				target := ts[appState.Selected]
 				path := strings.TrimSpace(appState.InputBuf)
-				
-				b, err := os.ReadFile(path)
+
+				fileInfo, err := os.Stat(path)
 				if err != nil {
 					appState.Status = fmt.Sprintf("✗ File not found: %s", path)
 					appState.Mode = ModeDeviceList
@@ -811,10 +856,10 @@ func handleKey(key []byte) bool {
 					filename := filepath.Base(path)
 					appState.Mode = ModeSending
 					appState.FileName = filename
-					appState.FileTotal = len(b)
+					appState.FileTotal = int(fileInfo.Size())
 					appState.FileDone = 0
 					appState.Status = fmt.Sprintf("Negotiating WebRTC Direct Connection to %s...", target.ID)
-					go sendFile(target, filename, b)
+					go sendFile(target, filename, path, int(fileInfo.Size()))
 				}
 			}
 		} else if c == 127 || c == 8 { // Backspace
@@ -833,7 +878,9 @@ func render(app *App) {
 
 	out += "╔════════════════════════════════════════════════════════════════════════════════╗\r\n"
 	myID := app.MyID
-	if myID == "" { myID = "connecting..." }
+	if myID == "" {
+		myID = "connecting..."
+	}
 	out += fmt.Sprintf("║  Send (Go) │  You: %-25s Username: %-23s ║\r\n", myID, trunc(app.MyUsername, 23))
 	out += "╠════════════════════════════════════════════════════════════════════════════════╣\r\n"
 	out += "║  #  │ Device           │ Typ │ Public IP       │ Private IP      │ Joined    ║\r\n"
@@ -846,15 +893,19 @@ func render(app *App) {
 		for _, dev := range app.Devices {
 			isYou := dev.ID == app.MyID
 			joined := timeAgo(dev.JoinedAt)
-			
+
 			if isYou {
 				label := dev.ID
-				if len(label) > 10 { label = label[:10] }
+				if len(label) > 10 {
+					label = label[:10]
+				}
 				label += " (You)"
 				out += fmt.Sprintf("║     │ %-16s │ %-3s │ %-15s │ %-15s │ %-9s ║\r\n", trunc(label, 16), trunc(dev.DeviceType, 3), trunc(dev.IP, 15), trunc(dev.PrivateIP, 15), trunc(joined, 9))
 			} else {
 				marker := " "
-				if targetIdx == app.Selected { marker = "►" }
+				if targetIdx == app.Selected {
+					marker = "►"
+				}
 				out += fmt.Sprintf("║ %s%-2d │ %-16s │ %-3s │ %-15s │ %-15s │ %-9s ║\r\n", marker, targetIdx+1, trunc(dev.ID, 16), trunc(dev.DeviceType, 3), trunc(dev.IP, 15), trunc(dev.PrivateIP, 15), trunc(joined, 9))
 				targetIdx++
 			}
@@ -868,12 +919,16 @@ func render(app *App) {
 		out += "║  ↑↓ Select  │  Enter: Send File  │  q: Quit                                  ║\r\n"
 	case ModeFileInput:
 		disp := app.InputBuf
-		if len(disp) > 60 { disp = disp[len(disp)-60:] }
+		if len(disp) > 60 {
+			disp = disp[len(disp)-60:]
+		}
 		out += fmt.Sprintf("║  File path: %-64s║\r\n", disp)
 		out += "║  Enter: Send  │  Esc: Cancel                                                ║\r\n"
 	case ModeSending:
 		pct := 0
-		if app.FileTotal > 0 { pct = app.FileDone * 100 / app.FileTotal }
+		if app.FileTotal > 0 {
+			pct = app.FileDone * 100 / app.FileTotal
+		}
 		bar := makeBar(pct, 40)
 		out += fmt.Sprintf("║  Sending: %-20s [%s] %3d%%                  ║\r\n", trunc(app.FileName, 20), bar, pct)
 	case ModeReceiving:
@@ -890,7 +945,9 @@ func render(app *App) {
 }
 
 func trunc(s string, l int) string {
-	if len(s) > l { return s[:l] }
+	if len(s) > l {
+		return s[:l]
+	}
 	return s
 }
 
