@@ -9,7 +9,7 @@ use tokio::sync::broadcast;
 use tower_http::{cors::CorsLayer, services::{ServeDir, ServeFile}};
 
 #[derive(Clone, Serialize, Deserialize)]
-struct DeviceInfo { ip: String, device_type: String, joined_at: i64 }
+struct DeviceInfo { ip: String, private_ip: String, device_type: String, joined_at: i64 }
 #[derive(Deserialize)] struct Settings { port: Option<u16>, host: Option<String> }
 
 struct AppState {
@@ -30,12 +30,16 @@ async fn main() {
     db.execute("CREATE TABLE IF NOT EXISTS Users (username VARCHAR(31) PRIMARY KEY, password TEXT NOT NULL)", []).unwrap();
     db.execute("CREATE TABLE IF NOT EXISTS Sessions (username VARCHAR(31), sessions TEXT, timeout INTEGER)", []).unwrap();
 
-    let (tx, _) = broadcast::channel(100);
+    let (tx, _) = broadcast::channel(16384);
     let state = Arc::new(AppState { db: Mutex::new(db), users: Mutex::new(HashMap::new()), tx });
 
-    let api = Router::new().route("/signup", post(signup)).route("/login", post(login)).route("/logout", post(logout));
+    let api = Router::new()
+        .route("/signup", post(signup))
+        .route("/login", post(login))
+        .route("/logout", post(logout))
+        .route("/check-session", post(check_session));
     let app = Router::new()
-        .nest_service("/", ServeDir::new("../Web").fallback(ServeFile::new("../Web/index.html")))
+        .nest_service("/", ServeDir::new("../Client/Web").fallback(ServeFile::new("../Client/Web/index.html")))
         .nest("/api", api)
         .route("/ws", get(|ws: WebSocketUpgrade, State(s), ConnectInfo(addr)| async move { ws.on_upgrade(move |socket| handle_ws(socket, s, addr)) }))
         .with_state(state).layer(CorsLayer::permissive());
@@ -81,14 +85,34 @@ async fn logout(State(s): State<Arc<AppState>>, headers: HeaderMap) -> impl Into
     Json(AuthRes { status: "ok".into(), session: None })
 }
 
+async fn check_session(State(s): State<Arc<AppState>>, Json(p): Json<serde_json::Value>) -> impl IntoResponse {
+    let session = p["session"].as_str().unwrap_or("");
+    match s.db.lock().unwrap().query_row(
+        "SELECT username FROM Sessions WHERE sessions = ?1 AND timeout > ?2",
+        params![session, ts()], |r| r.get::<_, String>(0)
+    ) {
+        Ok(username) => Json(serde_json::json!({"status": "ok", "username": username})),
+        Err(_) => Json(serde_json::json!({"status": "expired"})),
+    }
+}
+
+/// Build state JSON with device map
+fn build_state_json(users: &HashMap<String, HashMap<String, DeviceInfo>>, user: &str, dev: &str) -> String {
+    let empty = HashMap::new();
+    let devs = users.get(user).unwrap_or(&empty);
+    serde_json::to_string(&serde_json::json!({"type": "state", "you": dev, "devices": devs})).unwrap()
+}
+
 async fn handle_ws(mut ws: WebSocket, s: Arc<AppState>, addr: SocketAddr) {
     let mut user = String::new();
     let mut dev = String::new();
     let mut dtype = "web".to_string();
+    let mut private_ip = String::new();
     
     if let Some(Ok(Message::Text(t))) = ws.recv().await {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) {
             if let Some(dt) = v.get("device_type").and_then(|x| x.as_str()) { dtype = dt.to_string(); }
+            if let Some(pip) = v.get("private_ip").and_then(|x| x.as_str()) { private_ip = pip.to_string(); }
             if let Some(sess) = v.get("session").and_then(|x| x.as_str()) {
                 if let Ok(u) = s.db.lock().unwrap().query_row("SELECT username FROM Sessions WHERE sessions = ?1 AND timeout > ?2", params![sess, ts()], |r| r.get::<_, String>(0)) {
                     user = u;
@@ -100,13 +124,13 @@ async fn handle_ws(mut ws: WebSocket, s: Arc<AppState>, addr: SocketAddr) {
 
     if user.is_empty() { let _ = ws.send(Message::Text(r#"{"type":"auth_error"}"#.into())).await; return; }
 
-    s.users.lock().unwrap().entry(user.clone()).or_default().insert(dev.clone(), DeviceInfo { ip: addr.ip().to_string(), device_type: dtype, joined_at: ts() });
+    s.users.lock().unwrap().entry(user.clone()).or_default().insert(dev.clone(), DeviceInfo {
+        ip: addr.ip().to_string(), private_ip, device_type: dtype, joined_at: ts()
+    });
     
     let state_msg = || {
         let users = s.users.lock().unwrap();
-        let empty = HashMap::new();
-        let devs = users.get(&user).unwrap_or(&empty);
-        serde_json::to_string(&serde_json::json!({"type": "state", "you": dev, "devices": devs})).unwrap()
+        build_state_json(&users, &user, &dev)
     };
     let mut rx = s.tx.subscribe();
     
@@ -126,21 +150,36 @@ async fn handle_ws(mut ws: WebSocket, s: Arc<AppState>, addr: SocketAddr) {
                     }
                 }
             }
-            Ok((u, m)) = rx.recv() => {
-                if u == user {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&m) {
-                        let msg_type = v["type"].as_str().unwrap_or("");
-                        let to = v["to"].as_str().unwrap_or("");
-                        let from = v["from"].as_str().unwrap_or("");
-                        if msg_type == "state" || (to == dev && from != dev) {
-                            let _ = ws.send(Message::Text(m.into())).await;
+            msg = rx.recv() => {
+                match msg {
+                    Ok((u, m)) => {
+                        if u == user {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&m) {
+                                let msg_type = v["type"].as_str().unwrap_or("");
+                                let to = v["to"].as_str().unwrap_or("");
+                                let from = v["from"].as_str().unwrap_or("");
+                                if msg_type == "state" || (to == dev && from != dev) {
+                                    let _ = ws.send(Message::Text(m.into())).await;
+                                }
+                            }
                         }
                     }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        eprintln!("Device {} lagged, {} messages skipped", dev, n);
+                    }
+                    Err(_) => break,
                 }
             }
             else => break,
         }
     }
-    s.users.lock().unwrap().get_mut(&user).map(|d| d.remove(&dev));
+    // Cleanup: remove device entry, remove user if no devices left
+    {
+        let mut users = s.users.lock().unwrap();
+        if let Some(devs) = users.get_mut(&user) {
+            devs.remove(&dev);
+            if devs.is_empty() { users.remove(&user); }
+        }
+    }
     let _ = s.tx.send((user.clone(), state_msg()));
 }

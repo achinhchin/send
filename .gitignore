@@ -1,17 +1,72 @@
+# =========================
 # Rust
+# =========================
 **/target/
 **/*.rs.bk
+*.pdb
+Cargo.lock
+!Server/Cargo.lock
+!Client/CLI/Cargo.lock
 
+# =========================
 # Database
+# =========================
 *.db
+*.db-shm
+*.db-wal
 *.db-journal
 **/database/
 
-# CLI runtime files
+# =========================
+# CLI runtime / config
+# =========================
 session.txt
 devices.json
+settings.json
 received_*
 
-# OS
+# =========================
+# OS generated files
+# =========================
 .DS_Store
-settings.json
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# =========================
+# IDE / Editor
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+
+# =========================
+# Build output
+# =========================
+Client/CLI/out/
+
+# =========================
+# Environment / secrets
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# Logs
+# =========================
+*.log
+logs/
+
+# =========================
+# AI context (optional)
+# =========================
+AI-mem.md
