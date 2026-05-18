@@ -19,6 +19,8 @@ import (
 )
 
 const CHUNK_SIZE = 64 * 1024
+const MAX_BUFFER = 1 * 1024 * 1024 // 1MB max in-flight buffer for WebRTC
+const MAX_INFLIGHT_CHUNKS = 16     // Max chunks in-flight for WS relay
 
 type Config struct {
 	Host       *string `json:"host"`
@@ -347,6 +349,9 @@ var (
 	incomingTotal map[string]int
 	incomingDone  map[string]int
 	incomingName  map[string]string
+
+	// Relay send flow control
+	relaySendAckCh chan struct{}
 )
 
 func queueRender() {
@@ -508,6 +513,10 @@ func handleWSMessage(v map[string]interface{}) {
 			appState.Mode = ModeReceiving
 			appState.FileName = incomingName[from]
 			appState.FilePercent = pct
+			// Send ACK back to sender with bytes received so far
+			go wsConn.WriteJSON(map[string]interface{}{
+				"type": "file_ack", "to": from, "received": incomingDone[from] * CHUNK_SIZE,
+			})
 		}
 	case "file_done":
 		from, _ := v["from"].(string)
@@ -520,6 +529,22 @@ func handleWSMessage(v map[string]interface{}) {
 			delete(incomingTotal, from)
 			delete(incomingDone, from)
 			delete(incomingName, from)
+		}
+	case "file_ack":
+		receivedFloat, _ := v["received"].(float64)
+		received := int(receivedFloat)
+		if appState.Mode == ModeSending {
+			appState.FileDone = received
+			if received >= appState.FileTotal {
+				appState.FileDone = appState.FileTotal
+			}
+		}
+		// Unblock the relay sender goroutine
+		if relaySendAckCh != nil {
+			select {
+			case relaySendAckCh <- struct{}{}:
+			default:
+			}
 		}
 	// --- WebRTC Signaling Messages ---
 	case "webrtc_offer":
@@ -576,6 +601,18 @@ func sendFile(target DeviceEntry, filename string, path string, size int) {
 		return
 	}
 
+	ackCh := make(chan int, 100)
+
+	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+		// Receive ACK messages from the receiver
+		if msg.IsString {
+			var received int
+			if _, err := fmt.Sscanf(string(msg.Data), "ACK:%d", &received); err == nil {
+				ackCh <- received
+			}
+		}
+	})
+
 	dc.OnOpen(func() {
 		appMu.Lock()
 		route := "WAN"
@@ -597,23 +634,64 @@ func sendFile(target DeviceEntry, filename string, path string, size int) {
 		}
 		defer file.Close()
 
-		// Send file chunks over DataChannel
+		// Listen for ACKs and update sender progress
+		go func() {
+			for received := range ackCh {
+				appMu.Lock()
+				appState.FileDone = received
+				if received >= size {
+					appState.FileDone = size
+				}
+				appMu.Unlock()
+				queueRender()
+			}
+		}()
+
+		// Send file chunks over DataChannel with backpressure
+		const lowThreshold = 256 * 1024 // 256KB
+		dc.SetBufferedAmountLowThreshold(lowThreshold)
+		canSend := make(chan struct{}, 1)
+		dc.OnBufferedAmountLow(func() {
+			select {
+			case canSend <- struct{}{}:
+			default:
+			}
+		})
+
 		buf := make([]byte, CHUNK_SIZE)
 		for {
 			n, err := file.Read(buf)
 			if n > 0 {
+				// Wait if buffer is too full
+				for dc.BufferedAmount() > MAX_BUFFER {
+					<-canSend
+				}
 				dc.Send(buf[:n])
-				appMu.Lock()
-				appState.FileDone += n
-				appMu.Unlock()
-				queueRender()
 			}
 			if err != nil {
 				break
 			}
 		}
 		dc.SendText("DONE")
-		time.Sleep(1 * time.Second) // wait for buffer to flush
+
+		// Wait for final ACK from receiver (up to 30s)
+		timeout := time.After(30 * time.Second)
+		for {
+			appMu.Lock()
+			done := appState.FileDone >= size
+			appMu.Unlock()
+			if done {
+				break
+			}
+			select {
+			case <-timeout:
+				break
+			case <-time.After(100 * time.Millisecond):
+				continue
+			}
+			break
+		}
+		close(ackCh)
 
 		appMu.Lock()
 		appState.Status = fmt.Sprintf("✓ Sent '%s' via Direct %s WebRTC", filename, route)
@@ -695,6 +773,8 @@ func handleIncomingWebRTC(from string, sdp string, filename string, size int) {
 				if file != nil {
 					file.Close()
 				}
+				// Send final ACK to sender
+				dc.SendText(fmt.Sprintf("ACK:%d", receivedSize))
 				path := filepath.Join(appState.OutputPath, filename)
 				appMu.Lock()
 				appState.Status = fmt.Sprintf("✓ Saved '%s' (Direct WebRTC)", path)
@@ -716,6 +796,9 @@ func handleIncomingWebRTC(from string, sdp string, filename string, size int) {
 			appState.FilePercent = pct
 			appMu.Unlock()
 			queueRender()
+
+			// Send ACK back to sender every chunk
+			dc.SendText(fmt.Sprintf("ACK:%d", receivedSize))
 		})
 	})
 
@@ -766,6 +849,10 @@ func fallbackSendViaServer(target DeviceEntry, filename string, path string, siz
 		"type": "file_offer", "to": target.ID, "filename": filename, "size": size,
 	})
 
+	// Setup flow control: allow max N chunks in-flight
+	relaySendAckCh = make(chan struct{}, MAX_INFLIGHT_CHUNKS)
+	inflight := 0
+
 	buf := make([]byte, CHUNK_SIZE)
 	i := 0
 	for {
@@ -776,10 +863,12 @@ func fallbackSendViaServer(target DeviceEntry, filename string, path string, siz
 				"type": "file_chunk", "to": target.ID, "index": i, "data": b64,
 			})
 			i++
-			appMu.Lock()
-			appState.FileDone += n
-			appMu.Unlock()
-			queueRender()
+			inflight++
+			// If too many chunks in-flight, wait for ACK
+			for inflight >= MAX_INFLIGHT_CHUNKS {
+				<-relaySendAckCh
+				inflight--
+			}
 		}
 		if err != nil {
 			break
@@ -788,6 +877,26 @@ func fallbackSendViaServer(target DeviceEntry, filename string, path string, siz
 	wsConn.WriteJSON(map[string]interface{}{
 		"type": "file_done", "to": target.ID, "filename": filename, "totalChunks": total,
 	})
+
+	// Wait for receiver ACK to reach 100% (up to 5 min for large files)
+	timeout := time.After(5 * time.Minute)
+	for {
+		appMu.Lock()
+		done := appState.FileDone >= appState.FileTotal
+		appMu.Unlock()
+		if done {
+			break
+		}
+		select {
+		case <-timeout:
+			break
+		case <-time.After(200 * time.Millisecond):
+			continue
+		}
+		break
+	}
+
+	relaySendAckCh = nil
 
 	appMu.Lock()
 	appState.Status = fmt.Sprintf("✓ Sent '%s' via %s", filename, route)
