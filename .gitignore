@@ -59,8 +59,12 @@ Client/CLI/out/
 # =========================
 Server/send-server
 Server/send-server.exe
+Server/main
+Server/main.exe
 Client/CLI/send-cli
 Client/CLI/send-cli.exe
+Client/CLI/main
+Client/CLI/main.exe
 Client/CLI/send.json
 
 # =========================
