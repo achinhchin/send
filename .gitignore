@@ -23,6 +23,7 @@ Cargo.lock
 session.txt
 devices.json
 settings.json
+send.json
 received_*
 
 # =========================
@@ -52,6 +53,15 @@ Desktop.ini
 # Build output
 # =========================
 Client/CLI/out/
+
+# =========================
+# Go
+# =========================
+GoServer/send-server
+GoServer/send-server.exe
+GoClient/send-cli
+GoClient/send-cli.exe
+GoClient/send.json
 
 # =========================
 # Environment / secrets
