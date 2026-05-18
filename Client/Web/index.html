@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Send Web</title>
+    <style>
+        :root { --bg: #0a0a0a; --fg: #e0e0e0; --accent: #ffffff; --border: #333; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--fg); margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; min-height: 100vh; }
+        .container { width: 100%; max-width: 600px; }
+        h1 { font-weight: 400; letter-spacing: -0.5px; border-bottom: 1px solid var(--border); padding-bottom: 10px; margin-bottom: 20px; }
+        .card { background: #111; border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+        input, button { padding: 12px; font-size: 16px; border-radius: 4px; border: 1px solid var(--border); background: #000; color: var(--fg); margin-bottom: 10px; width: 100%; box-sizing: border-box; }
+        input:focus { outline: none; border-color: var(--accent); }
+        button { background: var(--fg); color: var(--bg); font-weight: 600; cursor: pointer; transition: 0.2s; border: none; }
+        button:hover { background: #fff; transform: translateY(-1px); }
+        .hidden { display: none !important; }
+        .device-item { padding: 15px; border: 1px solid var(--border); margin-bottom: 10px; border-radius: 6px; display: flex; justify-content: space-between; align-items: center; background: #0a0a0a; transition: border-color 0.2s; }
+        .device-item:hover { border-color: var(--accent); }
+        .device-info { display: flex; flex-direction: column; gap: 4px; }
+        .device-name { font-weight: 600; font-size: 16px; }
+        .device-meta { font-size: 12px; color: #888; }
+        .badge { background: #333; padding: 2px 6px; border-radius: 4px; font-size: 11px; text-transform: uppercase; }
+        .badge.you { background: var(--accent); color: var(--bg); font-weight: bold; }
+        .send-btn { width: auto; margin: 0; padding: 8px 16px; font-size: 14px; }
+        #status { font-family: monospace; font-size: 13px; color: #aaa; margin-top: 10px; white-space: pre-wrap; word-break: break-all; }
+        .progress-bar { width: 100%; height: 4px; background: #222; margin-top: 10px; border-radius: 2px; overflow: hidden; }
+        .progress-fill { width: 0%; height: 100%; background: var(--accent); transition: width 0.2s ease; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Send</h1>
+    
+    <div id="login-view" class="card">
+        <p style="margin-top:0; color:#aaa; font-size:14px;">Sign in to join your private network.</p>
+        <input type="text" id="username" placeholder="Username" autocomplete="username">
+        <input type="password" id="password" placeholder="Password" autocomplete="current-password">
+        <button onclick="login()">Login / Connect</button>
+        <div id="login-error" style="color: #ff5555; font-size: 13px; margin-top: 10px;"></div>
+    </div>
+
+    <div id="app-view" class="hidden">
+        <div class="card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <div style="font-weight: 500;">Network Devices</div>
+                <div id="my-identity" style="font-size: 12px; color: #888;"></div>
+            </div>
+            <div id="device-list"></div>
+        </div>
+        
+        <div class="card" id="transfer-card">
+            <div style="font-size: 14px; margin-bottom: 8px; font-weight: 500;">Transfer Status</div>
+            <div id="status">Waiting for transfers...</div>
+            <div class="progress-bar"><div class="progress-fill" id="progress"></div></div>
+            <input type="file" id="file-input" class="hidden">
+        </div>
+    </div>
+</div>
+
+<script>
+    const API_BASE = window.location.origin;
+    const WS_URL = API_BASE.replace('http', 'ws') + '/ws';
+    const CHUNK_SIZE = 64 * 1024;
+    const WEBRTC_CONFIG = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+    
+    let session = localStorage.getItem('send_session') || '';
+    let ws = null;
+    let myId = '';
+    let myPrivIp = '127.0.0.1'; // Browser can't easily get private IP, fallback to 127
+    
+    // WebRTC State
+    let peerConnections = {};
+    let incomingChunks = {}; // For WS fallback
+    let incomingMeta = {};
+    let activeDataChannels = {};
+
+    const el = (id) => document.getElementById(id);
+    const log = (msg) => { el('status').innerText = msg; console.log(msg); };
+    const progress = (pct) => el('progress').style.width = pct + '%';
+
+    // Auto-login if session exists
+    if (session) {
+        fetch(`${API_BASE}/api/check-session`, {
+            method: 'POST',
+            body: JSON.stringify({session})
+        }).then(r => r.json()).then(d => {
+            if (d.status === 'ok') initWS();
+        }).catch(() => {});
+    }
+
+    async function login() {
+        const u = el('username').value, p = el('password').value;
+        try {
+            let res = await fetch(`${API_BASE}/api/login`, { method: 'POST', body: JSON.stringify({username: u, password: p}) });
+            let data = await res.json();
+            if (data.status === 'ok') {
+                session = data.session;
+                localStorage.setItem('send_session', session);
+                initWS();
+            } else {
+                el('login-error').innerText = "Login failed. Invalid credentials.";
+            }
+        } catch (e) {
+            el('login-error').innerText = "Network error connecting to server.";
+        }
+    }
+
+    function initWS() {
+        el('login-view').classList.add('hidden');
+        el('app-view').classList.remove('hidden');
+        
+        ws = new WebSocket(WS_URL);
+        ws.onopen = () => {
+            log("Connected to Signal Server");
+            ws.send(JSON.stringify({ type: 'auth', session, device_type: 'web', private_ip: myPrivIp }));
+        };
+        ws.onclose = () => { log("Disconnected. Reconnecting..."); setTimeout(initWS, 3000); };
+        ws.onmessage = async (e) => {
+            const msg = JSON.parse(e.data);
+            if (msg.type === 'state') {
+                myId = msg.you;
+                el('my-identity').innerText = `You: ${myId}`;
+                renderDevices(msg.devices);
+            }
+            else if (msg.type === 'webrtc_offer') handleWebRTCOffer(msg);
+            else if (msg.type === 'webrtc_answer') peerConnections[msg.from]?.setRemoteDescription(new RTCSessionDescription({type:'answer', sdp:msg.sdp}));
+            else if (msg.type === 'webrtc_ice') peerConnections[msg.from]?.addIceCandidate(new RTCIceCandidate({candidate:msg.candidate}));
+            else if (msg.type === 'file_offer') handleWSFileOffer(msg);
+            else if (msg.type === 'file_chunk') handleWSFileChunk(msg);
+            else if (msg.type === 'file_done') handleWSFileDone(msg);
+        };
+    }
+
+    function renderDevices(devices) {
+        const container = el('device-list');
+        container.innerHTML = '';
+        if (Object.keys(devices).length === 0) {
+            container.innerHTML = '<div style="color:#666; font-size:14px; padding:10px;">No devices connected.</div>';
+            return;
+        }
+        
+        for (const [id, info] of Object.entries(devices)) {
+            const isYou = id === myId;
+            const div = document.createElement('div');
+            div.className = 'device-item';
+            div.innerHTML = `
+                <div class="device-info">
+                    <div class="device-name">${id} ${isYou ? '<span class="badge you">You</span>' : ''}</div>
+                    <div class="device-meta"><span class="badge">${info.device_type}</span> ${info.ip}</div>
+                </div>
+                ${!isYou ? `<button class="send-btn" onclick="selectFile('${id}')">Send File</button>` : ''}
+            `;
+            container.appendChild(div);
+        }
+    }
+
+    let targetDev = '';
+    function selectFile(id) {
+        targetDev = id;
+        el('file-input').click();
+    }
+
+    el('file-input').addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        el('file-input').value = ''; // reset
+        
+        log(`Negotiating WebRTC with ${targetDev}...`);
+        progress(0);
+        
+        // Attempt WebRTC
+        const pc = new RTCPeerConnection(WEBRTC_CONFIG);
+        peerConnections[targetDev] = pc;
+        
+        let connected = false;
+        const dc = pc.createDataChannel("file");
+        dc.binaryType = "arraybuffer";
+        
+        pc.onicecandidate = e => {
+            if (e.candidate) ws.send(JSON.stringify({ type: 'webrtc_ice', to: targetDev, candidate: e.candidate.candidate }));
+        };
+        
+        dc.onopen = async () => {
+            connected = true;
+            log(`Direct WebRTC: Sending ${file.name}...`);
+            const buffer = await file.arrayBuffer();
+            let offset = 0;
+            
+            // Chunked sending to avoid browser buffer overflow
+            const sendChunk = () => {
+                while (offset < buffer.byteLength) {
+                    if (dc.bufferedAmount > 1024 * 1024) {
+                        setTimeout(sendChunk, 50); // wait for buffer to drain
+                        return;
+                    }
+                    const chunk = buffer.slice(offset, offset + CHUNK_SIZE);
+                    dc.send(chunk);
+                    offset += chunk.byteLength;
+                    progress((offset / buffer.byteLength) * 100);
+                }
+                setTimeout(() => { dc.send("DONE"); log(`✓ Sent ${file.name} (Direct WebRTC)`); }, 500);
+            };
+            sendChunk();
+        };
+        
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        ws.send(JSON.stringify({ type: 'webrtc_offer', to: targetDev, sdp: offer.sdp, filename: file.name, size: file.size }));
+        
+        // Fallback timeout
+        setTimeout(async () => {
+            if (!connected) {
+                log(`WebRTC Timeout. Falling back to Server Relay for ${file.name}...`);
+                pc.close();
+                delete peerConnections[targetDev];
+                sendViaWS(file, targetDev);
+            }
+        }, 5000);
+    });
+
+    // Receive WebRTC
+    async function handleWebRTCOffer(msg) {
+        log(`WebRTC offer from ${msg.from} for ${msg.filename}`);
+        const pc = new RTCPeerConnection(WEBRTC_CONFIG);
+        peerConnections[msg.from] = pc;
+        
+        let receivedBuffers = [];
+        let receivedSize = 0;
+        
+        pc.onicecandidate = e => {
+            if (e.candidate) ws.send(JSON.stringify({ type: 'webrtc_ice', to: msg.from, candidate: e.candidate.candidate }));
+        };
+        
+        pc.ondatachannel = e => {
+            const dc = e.channel;
+            dc.binaryType = "arraybuffer";
+            dc.onmessage = evt => {
+                if (typeof evt.data === 'string' && evt.data === "DONE") {
+                    log(`✓ Saved ${msg.filename} (Direct WebRTC)`);
+                    downloadBlob(new Blob(receivedBuffers), msg.filename);
+                    progress(100);
+                } else {
+                    receivedBuffers.push(evt.data);
+                    receivedSize += evt.data.byteLength;
+                    progress((receivedSize / msg.size) * 100);
+                    log(`Receiving via WebRTC: ${msg.filename}`);
+                }
+            };
+        };
+        
+        await pc.setRemoteDescription(new RTCSessionDescription({type: 'offer', sdp: msg.sdp}));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        ws.send(JSON.stringify({ type: 'webrtc_answer', to: msg.from, sdp: answer.sdp }));
+    }
+
+    // WS Fallback Sender
+    async function sendViaWS(file, to) {
+        progress(0);
+        const buffer = await file.arrayBuffer();
+        const total = Math.ceil(buffer.byteLength / CHUNK_SIZE);
+        ws.send(JSON.stringify({ type: 'file_offer', to, filename: file.name, size: file.size }));
+        
+        let i = 0;
+        const sendWSChunk = () => {
+            if (i >= total) {
+                ws.send(JSON.stringify({ type: 'file_done', to, filename: file.name, totalChunks: total }));
+                log(`✓ Sent ${file.name} (Server Relay)`);
+                return;
+            }
+            const chunk = buffer.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+            const b64 = arrayBufferToBase64(chunk);
+            ws.send(JSON.stringify({ type: 'file_chunk', to, index: i, data: b64 }));
+            i++;
+            progress((i / total) * 100);
+            
+            // Small delay to prevent WS buffer overflow on server
+            setTimeout(sendWSChunk, 5); 
+        };
+        sendWSChunk();
+    }
+
+    // WS Fallback Receiver
+    function handleWSFileOffer(msg) {
+        incomingChunks[msg.from] = new Array(Math.ceil(msg.size / CHUNK_SIZE));
+        incomingMeta[msg.from] = { name: msg.filename, size: msg.size, done: 0 };
+        log(`Incoming via Server Relay: ${msg.filename}`);
+        progress(0);
+    }
+    
+    function handleWSFileChunk(msg) {
+        const meta = incomingMeta[msg.from];
+        if (meta && incomingChunks[msg.from]) {
+            incomingChunks[msg.from][msg.index] = base64ToArrayBuffer(msg.data);
+            meta.done++;
+            progress((meta.done / incomingChunks[msg.from].length) * 100);
+        }
+    }
+    
+    function handleWSFileDone(msg) {
+        const chunks = incomingChunks[msg.from];
+        const name = incomingMeta[msg.from].name;
+        if (chunks) {
+            downloadBlob(new Blob(chunks), name);
+            log(`✓ Saved ${name} (Server Relay)`);
+            delete incomingChunks[msg.from];
+            delete incomingMeta[msg.from];
+            progress(100);
+        }
+    }
+
+    // Utils
+    function downloadBlob(blob, name) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+    
+    function arrayBufferToBase64(buffer) {
+        let binary = '';
+        const bytes = new Uint8Array(buffer);
+        for (let i = 0; i < bytes.byteLength; i++) {
+            binary += String.fromCharCode(bytes[i]);
+        }
+        return window.btoa(binary);
+    }
+    
+    function base64ToArrayBuffer(base64) {
+        const binary_string = window.atob(base64);
+        const len = binary_string.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+            bytes[i] = binary_string.charCodeAt(i);
+        }
+        return bytes.buffer;
+    }
+</script>
+</body>
+</html>

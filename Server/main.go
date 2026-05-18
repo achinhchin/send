@@ -52,8 +52,20 @@ var (
 
 func ts() int64 { return time.Now().Unix() }
 
+type Settings struct {
+	Port int `json:"port"`
+}
+
 func main() {
-	var err error
+	port := 3000
+	b, err := os.ReadFile("settings.json")
+	if err == nil {
+		var s Settings
+		if err := json.Unmarshal(b, &s); err == nil && s.Port > 0 {
+			port = s.Port
+		}
+	}
+
 	err = os.MkdirAll("database", 0755)
 	db, err = sql.Open("sqlite3", "./database/users.db")
 	if err != nil {
@@ -75,8 +87,8 @@ func main() {
 	http.HandleFunc("/api/check-session", handleCheckSession)
 	http.HandleFunc("/ws", handleWS)
 
-	fmt.Println("Server running on 0.0.0.0:3000")
-	log.Fatal(http.ListenAndServe(":3000", nil))
+	fmt.Printf("Server running on 0.0.0.0:%d\n", port)
+	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", port), nil))
 }
 
 func handleSignup(w http.ResponseWriter, r *http.Request) {

@@ -100,6 +100,7 @@ type App struct {
 	Devices      []DeviceEntry
 	Selected     int
 	MyID         string
+	MyUsername   string
 	MyPrivateIP  string
 	Status       string
 	OutputPath   string
@@ -114,10 +115,11 @@ type App struct {
 	FilePercent int
 }
 
-func newApp(out string, privIP string) *App {
+func newApp(out string, privIP string, username string) *App {
 	return &App{
 		Mode:        ModeDeviceList,
 		MyPrivateIP: privIP,
+		MyUsername:  username,
 		OutputPath:  out,
 	}
 }
@@ -235,6 +237,8 @@ func main() {
 			return
 		}
 
+		var username string
+
 		if config.Session != nil {
 			url := fmt.Sprintf("http://%s:%d/api/check-session", *config.Host, *config.Port)
 			b, _ := json.Marshal(map[string]string{"session": *config.Session})
@@ -252,6 +256,7 @@ func main() {
 				saveConfig(config)
 				return
 			}
+			username = data["username"]
 		}
 
 		if config.Session == nil {
@@ -268,7 +273,7 @@ func main() {
 			return
 		}
 
-		runTUI(*config.Host, *config.Port, *config.Session, *config.OutputPath)
+		runTUI(*config.Host, *config.Port, *config.Session, username, *config.OutputPath)
 	}
 }
 
@@ -286,7 +291,14 @@ var (
 	incomingName   map[string]string
 )
 
-func runTUI(host string, port uint16, session string, output string) {
+func queueRender() {
+	select {
+	case renderCh <- struct{}{}:
+	default:
+	}
+}
+
+func runTUI(host string, port uint16, session string, username string, output string) {
 	wsURL := fmt.Sprintf("ws://%s:%d/ws", host, port)
 	c, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
@@ -305,7 +317,7 @@ func runTUI(host string, port uint16, session string, output string) {
 	}
 	c.WriteJSON(authMsg)
 
-	appState = newApp(output, privIP)
+	appState = newApp(output, privIP, username)
 	incomingChunks = make(map[string][]string)
 	incomingTotal = make(map[string]int)
 	incomingName = make(map[string]string)
@@ -342,13 +354,13 @@ func runTUI(host string, port uint16, session string, output string) {
 				appMu.Lock()
 				handleWSMessage(v)
 				appMu.Unlock()
-				renderCh <- struct{}{}
+				queueRender()
 			}
 		}
 	}()
 
 	// Initial render
-	renderCh <- struct{}{}
+	queueRender()
 
 	for {
 		select {
@@ -363,7 +375,7 @@ func runTUI(host string, port uint16, session string, output string) {
 			if exit {
 				return
 			}
-			renderCh <- struct{}{}
+			queueRender()
 		}
 	}
 }
@@ -521,7 +533,7 @@ func sendFile(target DeviceEntry, filename string, b []byte) {
 		}
 		appState.Status = fmt.Sprintf("Direct %s: Sending %s to %s", route, filename, target.ID)
 		appMu.Unlock()
-		renderCh <- struct{}{}
+		queueRender()
 
 		// Send file chunks over DataChannel
 		for i := 0; i < len(b); i += CHUNK_SIZE {
@@ -533,7 +545,7 @@ func sendFile(target DeviceEntry, filename string, b []byte) {
 			appMu.Lock()
 			appState.FileDone = end
 			appMu.Unlock()
-			renderCh <- struct{}{}
+			queueRender()
 		}
 		dc.SendText("DONE")
 		time.Sleep(1 * time.Second) // wait for buffer to flush
@@ -542,7 +554,7 @@ func sendFile(target DeviceEntry, filename string, b []byte) {
 		appState.Status = fmt.Sprintf("✓ Sent '%s' via Direct %s WebRTC", filename, route)
 		appState.Mode = ModeDeviceList
 		appMu.Unlock()
-		renderCh <- struct{}{}
+		queueRender()
 	})
 
 	pc.OnICECandidate(func(i *webrtc.ICECandidate) {
@@ -572,7 +584,7 @@ func sendFile(target DeviceEntry, filename string, b []byte) {
 			appMu.Lock()
 			appState.Status = "WebRTC Timeout, falling back to Server Relay..."
 			appMu.Unlock()
-			renderCh <- struct{}{}
+			queueRender()
 			
 			pc.Close()
 			pcMu.Lock()
@@ -601,7 +613,7 @@ func handleIncomingWebRTC(from string, sdp string, filename string, size int) {
 			appState.FilePercent = 0
 			appState.Status = fmt.Sprintf("Receiving via Direct WebRTC from %s", from)
 			appMu.Unlock()
-			renderCh <- struct{}{}
+			queueRender()
 		})
 
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
@@ -612,7 +624,7 @@ func handleIncomingWebRTC(from string, sdp string, filename string, size int) {
 				appState.Status = fmt.Sprintf("✓ Saved '%s' (Direct WebRTC)", path)
 				appState.Mode = ModeDeviceList
 				appMu.Unlock()
-				renderCh <- struct{}{}
+				queueRender()
 				return
 			}
 			fileBuf = append(fileBuf, msg.Data...)
@@ -622,7 +634,7 @@ func handleIncomingWebRTC(from string, sdp string, filename string, size int) {
 			if size > 0 { pct = len(fileBuf) * 100 / size }
 			appState.FilePercent = pct
 			appMu.Unlock()
-			renderCh <- struct{}{}
+			queueRender()
 		})
 	})
 
@@ -655,7 +667,7 @@ func fallbackSendViaServer(target DeviceEntry, filename string, b []byte) {
 	appState.FileDone = 0
 	appState.Status = fmt.Sprintf("Sending via %s to %s", route, target.ID)
 	appMu.Unlock()
-	renderCh <- struct{}{}
+	queueRender()
 
 	total := (len(b) + CHUNK_SIZE - 1) / CHUNK_SIZE
 	wsConn.WriteJSON(map[string]interface{}{
@@ -675,7 +687,7 @@ func fallbackSendViaServer(target DeviceEntry, filename string, b []byte) {
 		appMu.Lock()
 		appState.FileDone = end
 		appMu.Unlock()
-		renderCh <- struct{}{}
+		queueRender()
 	}
 	wsConn.WriteJSON(map[string]interface{}{
 		"type": "file_done", "to": target.ID, "filename": filename, "totalChunks": total,
@@ -685,7 +697,7 @@ func fallbackSendViaServer(target DeviceEntry, filename string, b []byte) {
 	appState.Status = fmt.Sprintf("✓ Sent '%s' via %s", filename, route)
 	appState.Mode = ModeDeviceList
 	appMu.Unlock()
-	renderCh <- struct{}{}
+	queueRender()
 }
 
 // ── TUI ─────────────────────────────────────────────────────────────────────
@@ -723,8 +735,11 @@ func handleKey(key []byte) bool {
 		}
 	case ModeFileInput:
 		if c == '\033' { // Esc
-			appState.Mode = ModeDeviceList
-			appState.Status = ""
+			if len(key) == 1 {
+				appState.Mode = ModeDeviceList
+				appState.Status = ""
+			}
+			// ignore ANSI escape sequences like arrows \033[D
 		} else if c == '\r' || c == '\n' {
 			ts := appState.targets()
 			if appState.Selected < len(ts) {
@@ -762,10 +777,10 @@ func render(app *App) {
 	out += "╔════════════════════════════════════════════════════════════════════════════════╗\r\n"
 	myID := app.MyID
 	if myID == "" { myID = "connecting..." }
-	out += fmt.Sprintf("║  Send (Go) │  You: %-60s║\r\n", myID)
+	out += fmt.Sprintf("║  Send (Go) │  You: %-25s Username: %-23s ║\r\n", myID, trunc(app.MyUsername, 23))
 	out += "╠════════════════════════════════════════════════════════════════════════════════╣\r\n"
-	out += "║  #  │ Device          │ Type │ Public IP       │ Private IP      │ Joined    ║\r\n"
-	out += "╠═════╪═════════════════╪══════╪═════════════════╪═════════════════╪═══════════╣\r\n"
+	out += "║  #  │ Device           │ Typ │ Public IP       │ Private IP      │ Joined    ║\r\n"
+	out += "╠═════╪══════════════════╪═════╪═════════════════╪═════════════════╪═══════════╣\r\n"
 
 	if len(app.Devices) == 0 {
 		out += "║                            No devices connected                            ║\r\n"
@@ -773,15 +788,17 @@ func render(app *App) {
 		targetIdx := 0
 		for _, dev := range app.Devices {
 			isYou := dev.ID == app.MyID
-			joined := "just now" // simplified
+			joined := timeAgo(dev.JoinedAt)
 			
 			if isYou {
-				label := dev.ID + " (You)"
-				out += fmt.Sprintf("║     │ %-15s │ %-4s │ %-15s │ %-15s │ %-9s ║\r\n", trunc(label, 15), trunc(dev.DeviceType, 4), trunc(dev.IP, 15), trunc(dev.PrivateIP, 15), joined)
+				label := dev.ID
+				if len(label) > 10 { label = label[:10] }
+				label += " (You)"
+				out += fmt.Sprintf("║     │ %-16s │ %-3s │ %-15s │ %-15s │ %-9s ║\r\n", trunc(label, 16), trunc(dev.DeviceType, 3), trunc(dev.IP, 15), trunc(dev.PrivateIP, 15), trunc(joined, 9))
 			} else {
 				marker := " "
 				if targetIdx == app.Selected { marker = "►" }
-				out += fmt.Sprintf("║ %s%-3d │ %-15s │ %-4s │ %-15s │ %-15s │ %-9s ║\r\n", marker, targetIdx+1, trunc(dev.ID, 15), trunc(dev.DeviceType, 4), trunc(dev.IP, 15), trunc(dev.PrivateIP, 15), joined)
+				out += fmt.Sprintf("║ %s%-2d │ %-16s │ %-3s │ %-15s │ %-15s │ %-9s ║\r\n", marker, targetIdx+1, trunc(dev.ID, 16), trunc(dev.DeviceType, 3), trunc(dev.IP, 15), trunc(dev.PrivateIP, 15), trunc(joined, 9))
 				targetIdx++
 			}
 		}
@@ -818,6 +835,18 @@ func render(app *App) {
 func trunc(s string, l int) string {
 	if len(s) > l { return s[:l] }
 	return s
+}
+
+func timeAgo(ts int64) string {
+	diff := time.Now().Unix() - ts
+	if diff < 60 {
+		return "just now"
+	} else if diff < 3600 {
+		return fmt.Sprintf("%dm ago", diff/60)
+	} else if diff < 86400 {
+		return fmt.Sprintf("%dh ago", diff/3600)
+	}
+	return fmt.Sprintf("%dd ago", diff/86400)
 }
 
 func makeBar(pct int, width int) string {
