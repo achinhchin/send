@@ -1046,6 +1046,8 @@ func render(app *App) {
 		bar := makeBar(pct, 30)
 		speed, eta := transferStats(app.FileDone, app.FileTotal, app.TransferStart)
 		out += fmt.Sprintf("║  ↑ %-14s [%s] %3d%% %s %s ║\r\n", trunc(app.FileName, 14), bar, pct, speed, eta)
+		sizeStr := fmt.Sprintf("%s / %s", humanSize(float64(app.FileDone)), humanSize(float64(app.FileTotal)))
+		out += fmt.Sprintf("║      %-70s║\r\n", sizeStr)
 	case ModeReceiving:
 		bar := makeBar(app.FilePercent, 30)
 		// For receiving, compute done from percent
@@ -1055,6 +1057,8 @@ func render(app *App) {
 		}
 		speed, eta := transferStats(recvDone, app.FileTotal, app.TransferStart)
 		out += fmt.Sprintf("║  ↓ %-14s [%s] %3d%% %s %s ║\r\n", trunc(app.FileName, 14), bar, app.FilePercent, speed, eta)
+		sizeStr := fmt.Sprintf("%s / %s", humanSize(float64(recvDone)), humanSize(float64(app.FileTotal)))
+		out += fmt.Sprintf("║      %-70s║\r\n", sizeStr)
 	}
 
 	if app.Status != "" {
