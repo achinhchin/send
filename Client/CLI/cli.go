@@ -236,8 +236,47 @@ func main() {
 		config.DeviceName = &n
 		saveConfig(config)
 		fmt.Printf("✓ Device name set to: %s\n", n)
+	case "delete-account":
+		if config.Host == nil || config.Port == nil {
+			fmt.Printf("Set host first:\n  %s host <ip> <port>\n", exeName)
+			return
+		}
+		user := ""
+		if len(args) > 2 {
+			user = args[2]
+		} else {
+			user = prompt("Username")
+		}
+		fmt.Print("Password: ")
+		passBytes, _ := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Println()
+		pass := string(passBytes)
+
+		confirm := prompt("Are you sure you want to permanently delete this account? (y/n)")
+		if strings.ToLower(confirm) != "y" {
+			fmt.Println("Cancelled.")
+			return
+		}
+
+		url := fmt.Sprintf("http://%s:%d/api/delete-account", *config.Host, *config.Port)
+		b, _ := json.Marshal(map[string]string{"username": user, "password": pass})
+		resp, err := http.Post(url, "application/json", bytes.NewBuffer(b))
+		if err == nil {
+			if resp.StatusCode == 200 {
+				fmt.Printf("✓ Account '%s' deleted successfully.\n", user)
+				if config.Session != nil {
+					// Clear local session just in case it was our account
+					config.Session = nil
+					saveConfig(config)
+				}
+			} else {
+				fmt.Println("✗ Deletion failed. Wrong username or password.")
+			}
+		} else {
+			fmt.Println("✗ Cannot connect to server")
+		}
 	case "help":
-		fmt.Printf("Send CLI\n\nSetup:\n  %s host <ip> <port>\n  %s signup <user>\n  %s login <user>\n  %s name <dev_name>\n  %s output <path>\n\nConnect:\n  %s\n", exeName, exeName, exeName, exeName, exeName, exeName)
+		fmt.Printf("Send CLI\n\nSetup:\n  %s host <ip> <port>\n  %s signup <user>\n  %s login <user>\n  %s name <dev_name>\n  %s output <path>\n  %s delete-account <user>\n\nConnect:\n  %s\n", exeName, exeName, exeName, exeName, exeName, exeName, exeName)
 	default:
 		// ── Check config completeness ───────────────────────────────
 		if config.Host == nil || config.Port == nil {

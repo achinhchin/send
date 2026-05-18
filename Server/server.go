@@ -85,6 +85,7 @@ func main() {
 	http.HandleFunc("/api/login", handleLogin)
 	http.HandleFunc("/api/logout", handleLogout)
 	http.HandleFunc("/api/check-session", handleCheckSession)
+	http.HandleFunc("/api/delete-account", handleDeleteAccount)
 	http.HandleFunc("/ws", handleWS)
 
 	fmt.Printf("Server running on 0.0.0.0:%d\n", port)
@@ -145,6 +146,35 @@ func handleCheckSession(w http.ResponseWriter, r *http.Request) {
 	} else {
 		json.NewEncoder(w).Encode(map[string]string{"status": "expired"})
 	}
+}
+
+func handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
+	var req AuthReq
+	json.NewDecoder(r.Body).Decode(&req)
+	var hash string
+	err := db.QueryRow("SELECT password FROM Users WHERE username = ?", req.Username).Scan(&hash)
+	if err == nil && bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)) == nil {
+		// Valid credentials, proceed to delete
+		db.Exec("DELETE FROM Users WHERE username = ?", req.Username)
+		db.Exec("DELETE FROM Sessions WHERE username = ?", req.Username)
+
+		// Disconnect all active devices for this user
+		usersMu.Lock()
+		delete(users, req.Username)
+		usersMu.Unlock()
+
+		connsMu.Lock()
+		for _, conn := range conns[req.Username] {
+			conn.Close()
+		}
+		delete(conns, req.Username)
+		connsMu.Unlock()
+
+		json.NewEncoder(w).Encode(AuthRes{Status: "ok"})
+		return
+	}
+	w.WriteHeader(http.StatusUnauthorized)
+	json.NewEncoder(w).Encode(AuthRes{Status: "err"})
 }
 
 func buildStateJSON(username string) string {
