@@ -493,26 +493,9 @@ var webrtcConfig = webrtc.Configuration{
 	},
 }
 
-func sendFile(target DeviceEntry, filepathStr string) {
-	b, err := os.ReadFile(filepathStr)
-	if err != nil {
-		appMu.Lock()
-		appState.Status = fmt.Sprintf("✗ File not found: %s", filepathStr)
-		appState.Mode = ModeDeviceList
-		appMu.Unlock()
-		renderCh <- struct{}{}
-		return
-	}
-	filename := filepath.Base(filepathStr)
+func sendFile(target DeviceEntry, filename string, b []byte) {
 
-	appMu.Lock()
-	appState.Mode = ModeSending
-	appState.FileName = filename
-	appState.FileTotal = len(b)
-	appState.FileDone = 0
-	appState.Status = fmt.Sprintf("Negotiating WebRTC Direct Connection to %s...", target.ID)
-	appMu.Unlock()
-	renderCh <- struct{}{}
+	// Mode and initial status are now set synchronously in handleKey
 
 	pc, err := webrtc.NewPeerConnection(webrtcConfig)
 	if err != nil {
@@ -747,7 +730,20 @@ func handleKey(key []byte) bool {
 			if appState.Selected < len(ts) {
 				target := ts[appState.Selected]
 				path := strings.TrimSpace(appState.InputBuf)
-				go sendFile(target, path)
+				
+				b, err := os.ReadFile(path)
+				if err != nil {
+					appState.Status = fmt.Sprintf("✗ File not found: %s", path)
+					appState.Mode = ModeDeviceList
+				} else {
+					filename := filepath.Base(path)
+					appState.Mode = ModeSending
+					appState.FileName = filename
+					appState.FileTotal = len(b)
+					appState.FileDone = 0
+					appState.Status = fmt.Sprintf("Negotiating WebRTC Direct Connection to %s...", target.ID)
+					go sendFile(target, filename, b)
+				}
 			}
 		} else if c == 127 || c == 8 { // Backspace
 			if len(appState.InputBuf) > 0 {

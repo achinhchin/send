@@ -57,11 +57,11 @@ Client/CLI/out/
 # =========================
 # Go
 # =========================
-GoServer/send-server
-GoServer/send-server.exe
-GoClient/send-cli
-GoClient/send-cli.exe
-GoClient/send.json
+Server/send-server
+Server/send-server.exe
+Client/CLI/send-cli
+Client/CLI/send-cli.exe
+Client/CLI/send.json
 
 # =========================
 # Environment / secrets
