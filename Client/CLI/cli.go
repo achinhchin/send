@@ -113,10 +113,11 @@ type App struct {
 	InputBuf string
 
 	// Transfer state
-	FileName    string
-	FileTotal   int
-	FileDone    int
-	FilePercent int
+	FileName      string
+	FileTotal     int
+	FileDone      int
+	FilePercent   int
+	TransferStart time.Time
 }
 
 func newApp(out string, privIP string, username string) *App {
@@ -486,6 +487,7 @@ func handleWSMessage(v map[string]interface{}) {
 		appState.Mode = ModeReceiving
 		appState.FileName = name
 		appState.FilePercent = 0
+		appState.TransferStart = time.Now()
 
 		route := "Server Relay"
 		for _, d := range appState.Devices {
@@ -757,6 +759,7 @@ func handleIncomingWebRTC(from string, sdp string, filename string, size int) {
 			appState.Mode = ModeReceiving
 			appState.FileName = filename
 			appState.FilePercent = 0
+			appState.TransferStart = time.Now()
 			appState.Status = fmt.Sprintf("Receiving via Direct WebRTC from %s", from)
 
 			path := filepath.Join(appState.OutputPath, filename)
@@ -840,6 +843,7 @@ func fallbackSendViaServer(target DeviceEntry, filename string, path string, siz
 	appState.FileName = filename
 	appState.FileTotal = size
 	appState.FileDone = 0
+	appState.TransferStart = time.Now()
 	appState.Status = fmt.Sprintf("Sending via %s to %s", route, target.ID)
 	appMu.Unlock()
 	queueRender()
@@ -967,6 +971,7 @@ func handleKey(key []byte) bool {
 					appState.FileName = filename
 					appState.FileTotal = int(fileInfo.Size())
 					appState.FileDone = 0
+					appState.TransferStart = time.Now()
 					appState.Status = fmt.Sprintf("Negotiating WebRTC Direct Connection to %s...", target.ID)
 					go sendFile(target, filename, path, int(fileInfo.Size()))
 				}
@@ -1038,11 +1043,18 @@ func render(app *App) {
 		if app.FileTotal > 0 {
 			pct = app.FileDone * 100 / app.FileTotal
 		}
-		bar := makeBar(pct, 40)
-		out += fmt.Sprintf("║  Sending: %-20s [%s] %3d%%                  ║\r\n", trunc(app.FileName, 20), bar, pct)
+		bar := makeBar(pct, 30)
+		speed, eta := transferStats(app.FileDone, app.FileTotal, app.TransferStart)
+		out += fmt.Sprintf("║  ↑ %-14s [%s] %3d%% %s %s ║\r\n", trunc(app.FileName, 14), bar, pct, speed, eta)
 	case ModeReceiving:
-		bar := makeBar(app.FilePercent, 40)
-		out += fmt.Sprintf("║  Receiving: %-18s [%s] %3d%%                  ║\r\n", trunc(app.FileName, 18), bar, app.FilePercent)
+		bar := makeBar(app.FilePercent, 30)
+		// For receiving, compute done from percent
+		recvDone := 0
+		if app.FileTotal > 0 {
+			recvDone = app.FilePercent * app.FileTotal / 100
+		}
+		speed, eta := transferStats(recvDone, app.FileTotal, app.TransferStart)
+		out += fmt.Sprintf("║  ↓ %-14s [%s] %3d%% %s %s ║\r\n", trunc(app.FileName, 14), bar, app.FilePercent, speed, eta)
 	}
 
 	if app.Status != "" {
@@ -1075,4 +1087,33 @@ func timeAgo(ts int64) string {
 func makeBar(pct int, width int) string {
 	filled := width * pct / 100
 	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+}
+
+func humanSize(b float64) string {
+	if b < 1024 {
+		return fmt.Sprintf("%.0f B", b)
+	} else if b < 1024*1024 {
+		return fmt.Sprintf("%.1f KB", b/1024)
+	} else if b < 1024*1024*1024 {
+		return fmt.Sprintf("%.1f MB", b/(1024*1024))
+	}
+	return fmt.Sprintf("%.2f GB", b/(1024*1024*1024))
+}
+
+func transferStats(done int, total int, start time.Time) (string, string) {
+	elapsed := time.Since(start).Seconds()
+	if elapsed < 0.5 || done <= 0 {
+		return fmt.Sprintf("%8s/s", "---"), fmt.Sprintf("ETA %5s", "--:--")
+	}
+	speed := float64(done) / elapsed
+	speedStr := fmt.Sprintf("%8s/s", humanSize(speed))
+	remaining := total - done
+	if remaining <= 0 || speed <= 0 {
+		return speedStr, fmt.Sprintf("ETA %5s", "00:00")
+	}
+	etaSec := int(float64(remaining) / speed)
+	if etaSec > 3600 {
+		return speedStr, fmt.Sprintf("ETA %dh%02dm", etaSec/3600, (etaSec%3600)/60)
+	}
+	return speedStr, fmt.Sprintf("ETA %02d:%02d", etaSec/60, etaSec%60)
 }
