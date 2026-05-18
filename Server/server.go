@@ -193,17 +193,20 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 		if sess, ok := authReq["session"].(string); ok {
 			err := db.QueryRow("SELECT username FROM Sessions WHERE sessions = ? AND timeout > ?", sess, ts()).Scan(&username)
 			if err == nil {
-				// simple dev ID generation
-				alphanum := ""
-				for _, c := range sess {
-					if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
-						alphanum += string(c)
-						if len(alphanum) == 6 {
-							break
+				if dn, ok := authReq["device_name"].(string); ok && dn != "" {
+					devID = dn
+				} else {
+					alphanum := ""
+					for _, c := range sess {
+						if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+							alphanum += string(c)
+							if len(alphanum) == 6 {
+								break
+							}
 						}
 					}
+					devID = "Dev-" + alphanum
 				}
-				devID = "Dev-" + alphanum
 			}
 		}
 	}
@@ -235,6 +238,9 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 	if conns[username] == nil {
 		conns[username] = make(map[string]*websocket.Conn)
 	}
+	if oldConn, exists := conns[username][devID]; exists {
+		oldConn.Close()
+	}
 	conns[username][devID] = conn
 	connsMu.Unlock()
 
@@ -265,21 +271,21 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Cleanup
-	usersMu.Lock()
-	if _, ok := users[username]; ok {
-		delete(users[username], devID)
-		if len(users[username]) == 0 {
-			delete(users, username)
-		}
-	}
-	usersMu.Unlock()
-
 	connsMu.Lock()
-	if _, ok := conns[username]; ok {
+	if c, ok := conns[username][devID]; ok && c == conn {
 		delete(conns[username], devID)
 		if len(conns[username]) == 0 {
 			delete(conns, username)
 		}
+		
+		usersMu.Lock()
+		if _, ok := users[username]; ok {
+			delete(users[username], devID)
+			if len(users[username]) == 0 {
+				delete(users, username)
+			}
+		}
+		usersMu.Unlock()
 	}
 	connsMu.Unlock()
 

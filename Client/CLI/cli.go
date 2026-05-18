@@ -25,6 +25,7 @@ type Config struct {
 	Port       *uint16 `json:"port"`
 	Session    *string `json:"session"`
 	OutputPath *string `json:"output_path"`
+	DeviceName *string `json:"device_name"`
 }
 
 func configPath() string {
@@ -226,8 +227,17 @@ func main() {
 		config.OutputPath = &p
 		saveConfig(config)
 		fmt.Printf("✓ Output path set to: %s\n", p)
+	case "name":
+		if len(args) < 3 {
+			fmt.Printf("Usage: %s name <device_name>\n", exeName)
+			return
+		}
+		n := args[2]
+		config.DeviceName = &n
+		saveConfig(config)
+		fmt.Printf("✓ Device name set to: %s\n", n)
 	case "help":
-		fmt.Printf("Send CLI\n\nSetup:\n  %s host <ip> <port>\n  %s signup <user>\n  %s login <user>\n  %s output <path>\n\nConnect:\n  %s\n", exeName, exeName, exeName, exeName, exeName)
+		fmt.Printf("Send CLI\n\nSetup:\n  %s host <ip> <port>\n  %s signup <user>\n  %s login <user>\n  %s name <dev_name>\n  %s output <path>\n\nConnect:\n  %s\n", exeName, exeName, exeName, exeName, exeName, exeName)
 	default:
 		// ── Check config completeness ───────────────────────────────
 		if config.Host == nil || config.Port == nil {
@@ -266,6 +276,13 @@ func main() {
 			return
 		}
 
+		if config.DeviceName == nil {
+			fmt.Printf("Device name not set.\n\n")
+			fmt.Printf("  %s name <your_device_name>\n", exeName)
+			fmt.Printf("  Example: %s name Mac-Office\n", exeName)
+			return
+		}
+
 		if config.OutputPath == nil {
 			fmt.Printf("No output path set.\n\n")
 			fmt.Printf("  %s output <directory_path>\n", exeName)
@@ -273,7 +290,7 @@ func main() {
 			return
 		}
 
-		runTUI(*config.Host, *config.Port, *config.Session, username, *config.OutputPath)
+		runTUI(*config.Host, *config.Port, *config.Session, username, *config.DeviceName, *config.OutputPath)
 	}
 }
 
@@ -298,7 +315,7 @@ func queueRender() {
 	}
 }
 
-func runTUI(host string, port uint16, session string, username string, output string) {
+func runTUI(host string, port uint16, session string, username string, devName string, output string) {
 	wsURL := fmt.Sprintf("ws://%s:%d/ws", host, port)
 	c, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
@@ -313,6 +330,7 @@ func runTUI(host string, port uint16, session string, username string, output st
 		"type":        "auth",
 		"session":     session,
 		"device_type": "cli",
+		"device_name": devName,
 		"private_ip":  privIP,
 	}
 	c.WriteJSON(authMsg)

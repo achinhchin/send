@@ -61,10 +61,14 @@ Server/send-server
 Server/send-server.exe
 Server/main
 Server/main.exe
+Server/server
+Server/server.exe
 Client/CLI/send-cli
 Client/CLI/send-cli.exe
 Client/CLI/main
 Client/CLI/main.exe
+Client/CLI/cli
+Client/CLI/cli.exe
 Client/CLI/send.json
 
 # =========================

@@ -37,6 +37,7 @@
         <p style="margin-top:0; color:#aaa; font-size:14px;">Sign in to join your private network.</p>
         <input type="text" id="username" placeholder="Username" autocomplete="username">
         <input type="password" id="password" placeholder="Password" autocomplete="current-password">
+        <input type="text" id="device-name" placeholder="Device Name (e.g. Chrome-Mac)">
         <button onclick="login()">Login / Connect</button>
         <div id="login-error" style="color: #ff5555; font-size: 13px; margin-top: 10px;"></div>
     </div>
@@ -66,9 +67,13 @@
     const WEBRTC_CONFIG = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
     
     let session = localStorage.getItem('send_session') || '';
+    let deviceName = localStorage.getItem('send_dev_name') || '';
     let ws = null;
     let myId = '';
     let myPrivIp = '127.0.0.1'; // Browser can't easily get private IP, fallback to 127
+
+    // Set initial value
+    if (deviceName) el('device-name').value = deviceName;
     
     // WebRTC State
     let peerConnections = {};
@@ -81,7 +86,7 @@
     const progress = (pct) => el('progress').style.width = pct + '%';
 
     // Auto-login if session exists
-    if (session) {
+    if (session && deviceName) {
         fetch(`${API_BASE}/api/check-session`, {
             method: 'POST',
             body: JSON.stringify({session})
@@ -91,13 +96,16 @@
     }
 
     async function login() {
-        const u = el('username').value, p = el('password').value;
+        const u = el('username').value, p = el('password').value, dn = el('device-name').value;
+        if (!dn) { el('login-error').innerText = "Please enter a device name."; return; }
         try {
             let res = await fetch(`${API_BASE}/api/login`, { method: 'POST', body: JSON.stringify({username: u, password: p}) });
             let data = await res.json();
             if (data.status === 'ok') {
                 session = data.session;
+                deviceName = dn;
                 localStorage.setItem('send_session', session);
+                localStorage.setItem('send_dev_name', deviceName);
                 initWS();
             } else {
                 el('login-error').innerText = "Login failed. Invalid credentials.";
@@ -114,7 +122,7 @@
         ws = new WebSocket(WS_URL);
         ws.onopen = () => {
             log("Connected to Signal Server");
-            ws.send(JSON.stringify({ type: 'auth', session, device_type: 'web', private_ip: myPrivIp }));
+            ws.send(JSON.stringify({ type: 'auth', session, device_type: 'web', device_name: deviceName, private_ip: myPrivIp }));
         };
         ws.onclose = () => { log("Disconnected. Reconnecting..."); setTimeout(initWS, 3000); };
         ws.onmessage = async (e) => {
