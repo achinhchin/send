@@ -97,10 +97,10 @@ async fn check_session(State(s): State<Arc<AppState>>, Json(p): Json<serde_json:
 }
 
 /// Build state JSON with device map
-fn build_state_json(users: &HashMap<String, HashMap<String, DeviceInfo>>, user: &str, dev: &str) -> String {
+fn build_state_json(users: &HashMap<String, HashMap<String, DeviceInfo>>, user: &str) -> String {
     let empty = HashMap::new();
     let devs = users.get(user).unwrap_or(&empty);
-    serde_json::to_string(&serde_json::json!({"type": "state", "you": dev, "devices": devs})).unwrap()
+    serde_json::to_string(&serde_json::json!({"type": "state", "devices": devs})).unwrap()
 }
 
 async fn handle_ws(mut ws: WebSocket, s: Arc<AppState>, addr: SocketAddr) {
@@ -130,18 +130,24 @@ async fn handle_ws(mut ws: WebSocket, s: Arc<AppState>, addr: SocketAddr) {
     
     let state_msg = || {
         let users = s.users.lock().unwrap();
-        build_state_json(&users, &user, &dev)
+        build_state_json(&users, &user)
     };
     let mut rx = s.tx.subscribe();
     
-    let _ = ws.send(Message::Text(state_msg().into())).await;
+    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&state_msg()) {
+        v["you"] = serde_json::Value::String(dev.clone());
+        let _ = ws.send(Message::Text(serde_json::to_string(&v).unwrap().into())).await;
+    }
     let _ = s.tx.send((user.clone(), state_msg()));
 
     loop {
         tokio::select! {
             Some(Ok(Message::Text(t))) = ws.recv() => {
                 if t.contains("\"reload\"") {
-                    let _ = ws.send(Message::Text(state_msg().into())).await;
+                    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&state_msg()) {
+                        v["you"] = serde_json::Value::String(dev.clone());
+                        let _ = ws.send(Message::Text(serde_json::to_string(&v).unwrap().into())).await;
+                    }
                 } else if t.contains("\"to\"") {
                     // Relay file messages (file_offer, file_chunk, file_done) to target
                     if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&t) {
@@ -154,11 +160,14 @@ async fn handle_ws(mut ws: WebSocket, s: Arc<AppState>, addr: SocketAddr) {
                 match msg {
                     Ok((u, m)) => {
                         if u == user {
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&m) {
-                                let msg_type = v["type"].as_str().unwrap_or("");
-                                let to = v["to"].as_str().unwrap_or("");
-                                let from = v["from"].as_str().unwrap_or("");
-                                if msg_type == "state" || (to == dev && from != dev) {
+                            if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&m) {
+                                let msg_type = v["type"].as_str().unwrap_or("").to_string();
+                                let to = v["to"].as_str().unwrap_or("").to_string();
+                                let from = v["from"].as_str().unwrap_or("").to_string();
+                                if msg_type == "state" {
+                                    v["you"] = serde_json::Value::String(dev.clone());
+                                    let _ = ws.send(Message::Text(serde_json::to_string(&v).unwrap().into())).await;
+                                } else if to == dev && from != dev {
                                     let _ = ws.send(Message::Text(m.into())).await;
                                 }
                             }

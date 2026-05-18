@@ -1,4 +1,4 @@
-use crossterm::{cursor, event::{Event, EventStream, KeyCode, KeyModifiers}, execute, queue, style, terminal::{self, ClearType}};
+use crossterm::{cursor, event::{Event, EventStream, KeyCode, KeyModifiers, KeyEventKind}, execute, queue, style, terminal::{self, ClearType}};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -447,6 +447,9 @@ async fn run_tui(host: &str, port: u16, session: &str, output_path: &str) {
             }
             Some(Ok(event)) = event_stream.next() => {
                 if let Event::Key(key) = event {
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
                     match &app.mode {
                         Mode::DeviceList => {
                             match key.code {
